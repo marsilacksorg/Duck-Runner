@@ -1,0 +1,765 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Duck Runner — Loot Boxes & Skins</title>
+<style>
+  :root{
+    --bg:#f4fbff; --accent:#0e7b63; --muted:#6d7b7a;
+  }
+  html,body{height:100%;margin:0;font-family:Inter,system-ui,Arial,sans-serif;background:var(--bg);color:#0f1720}
+  .wrap{max-width:1000px;margin:18px auto;padding:16px}
+  header{display:flex;justify-content:space-between;align-items:center;gap:12px}
+  h1{font-size:18px;margin:0}
+  button{background:var(--accent);color:#fff;border:0;padding:8px 12px;border-radius:8px;cursor:pointer}
+  button.secondary{background:#eef2f2;color:#223}
+  .game-area{margin-top:12px;background:#fff;border-radius:12px;padding:14px;box-shadow:0 8px 30px rgba(0,0,0,0.06)}
+  #hud{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+  canvas#game{display:block;background:linear-gradient(#e8fafe,#ffffff);border-radius:8px;max-width:100%}
+  .shop{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+  .card{background:#fafafa;border:1px solid #eee;padding:10px;border-radius:8px;width:170px}
+  .muted{color:var(--muted);font-size:13px}
+  .big{font-weight:700;font-size:16px}
+  footer{margin-top:12px;color:var(--muted);font-size:13px}
+  .preview{width:64px;height:48px;border-radius:8px;background:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,0.6)}
+  @media(max-width:640px){header{flex-direction:column;align-items:flex-start}}
+  .modal {
+    position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:#fff;padding:12px;border-radius:10px;box-shadow:0 10px 40px rgba(0,0,0,0.25);z-index:9999;
+    animation: pop .18s ease;
+  }
+  @keyframes pop { from { transform: translate(-50%,-50%) scale(.85); opacity:0 } to { transform: translate(-50%,-50%) scale(1); opacity:1 } }
+
+  .loot-inventory {
+    margin-top:16px;
+    padding:10px;
+    border:1px solid #ccc;
+    border-radius:8px;
+    background:#fafafa;
+  }
+  .loot-row {
+    display:flex;
+    justify-content:space-between;
+    gap:8px;
+    align-items:center;
+    padding:6px 0;
+    border-bottom:1px solid #eee;
+  }
+  .loot-row:last-child { border-bottom:none; }
+  .loot-left { display:flex;align-items:center;gap:10px }
+  .loot-dot { width:14px;height:14px;border-radius:3px }
+  .count-badge { background:#111;color:#fff;border-radius:999px;padding:2px 8px;font-size:13px }
+  .inventory-actions { display:flex; gap:8px }
+
+  /* modal inner layout for reveal */
+  .loot-reveal { text-align:center; min-width:260px }
+  .loot-reveal canvas { border-radius:8px; background:#fff; display:block; margin: 8px auto; }
+  .confetti-canvas {
+    position:fixed; left:0; top:0; width:100vw; height:100vh; pointer-events:none; z-index:10000;
+  }
+
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Duck Runner — Loot Boxes & Skins</h1>
+    <div style="display:flex;gap:12px;align-items:center">
+      <div class="muted">Coins:</div><div id="coinCount" class="big">0</div>
+      <button id="playBtn">Play</button>
+      <button id="resetBtn" class="secondary">Reset</button>
+    </div>
+  </header>
+
+  <div class="game-area">
+    <div id="hud">
+      <div>
+        <label><input type="radio" name="mode" value="endless" checked> Endless</label>
+        <label style="margin-left:8px"><input type="radio" name="mode" value="levels"> Levels</label>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <div class="muted">Score:</div><div id="score" class="big">0</div>
+      </div>
+    </div>
+
+    <canvas id="game" width="900" height="180"></canvas>
+
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+      <div class="muted">Controls: Space / Up = Jump, Down = Duck. Tap to jump on mobile.</div>
+      <div class="muted">Loot Boxes: pick up to collect — claim them later!</div>
+    </div>
+
+    <section style="margin-top:14px">
+      <h3 style="margin:0 0 8px 0">Character Shop</h3>
+      <div class="shop" id="shop"></div>
+    </section>
+
+    <section class="loot-inventory">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h3 style="margin:0 0 8px 0">Lootbox Inventory</h3>
+        <div>
+          <button id="claimAllBtn">Claim All</button>
+        </div>
+      </div>
+      <div id="lootInventory"></div>
+    </section>
+
+    <footer>Progress auto-saves to localStorage. Legendary skins only from lootboxes.</footer>
+  </div>
+</div>
+
+<!-- modal for loot reveal and temporary messages -->
+<div id="lootModal" style="display:none"></div>
+<canvas id="confetti" class="confetti-canvas" style="display:none"></canvas>
+
+<script>
+/*
+  Enhanced version:
+  - Stacked inventory counts
+  - Claim per type and Discard
+  - Claim All button (claims sequentially, reveals each)
+  - Confetti animation on claim
+  - All persistent via localStorage
+*/
+
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const coinEl = document.getElementById('coinCount');
+  const scoreEl = document.getElementById('score');
+  const playBtn = document.getElementById('playBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const shopEl = document.getElementById('shop');
+  const lootModal = document.getElementById('lootModal');
+  const lootInventoryEl = document.getElementById('lootInventory');
+  const claimAllBtn = document.getElementById('claimAllBtn');
+  const confettiCanvas = document.getElementById('confetti');
+  const confettiCtx = confettiCanvas.getContext('2d');
+
+  const LS = {
+    coins: 'duck_coins_v1',
+    unlocked: 'duck_unlocked_v1',
+    selected: 'duck_selected_v1',
+    lootInv: 'duck_loot_inv_v1'
+  };
+
+  const SKINS = [
+    {id:'mallard',name:'Mallard',price:0,rarity:'common',palette:['#2f6b3b','#dbe9df']},
+    {id:'rubber',name:'Rubber Duck',price:100,rarity:'common',palette:['#ffbd33','#ffd888']},
+    {id:'teal',name:'Teal Duck',price:120,rarity:'common',palette:['#0fb3a3','#cdeee9']},
+    {id:'sunny',name:'Sunny Duck',price:150,rarity:'common',palette:['#ffd166','#fff0c9']},
+    {id:'bluejay',name:'Bluejay Duck',price:180,rarity:'rare',palette:['#2b6fb6','#dbeeff']},
+    {id:'forest',name:'Forest Duck',price:200,rarity:'rare',palette:['#2d6b3a','#e6f4ea']},
+    {id:'lava',name:'Lava Duck',price:300,rarity:'rare',palette:['#ff6b35','#ffddb0']},
+    {id:'ice',name:'Ice Duck',price:300,rarity:'rare',palette:['#dff3ff','#9bc6d6']},
+    {id:'neon',name:'Neon Duck',price:500,rarity:'epic',palette:['#00f5a0','#bfffe3']},
+    {id:'stealth',name:'Stealth Duck',price:550,rarity:'epic',palette:['#111213','#515254']},
+    {id:'gold',name:'Golden Duck',price:900,rarity:'epic',palette:['#ffd700','#fff3b8']},
+    {id:'phoenix',name:'Phoenix Duck',price:0,rarity:'legendary',palette:['#ff5f2e','#ffd9c2']},
+    {id:'cosmos',name:'Cosmos Duck',price:0,rarity:'legendary',palette:['#3b2b8c','#e7e1ff']},
+    {id:'shadow',name:'Shadow Duck',price:0,rarity:'legendary',palette:['#050506','#303033']}
+  ];
+
+  const LOOTBOX_TYPES = [
+    {type:'wooden',name:'Wooden Box',color:'#8b5e3c',rates:{common:0.8,rare:0.15,epic:0.05,legendary:0}},
+    {type:'bronze',name:'Bronze Box',color:'#cd7f32',rates:{common:0.6,rare:0.3,epic:0.09,legendary:0.01}},
+    {type:'silver',name:'Silver Box',color:'#c0c0c0',rates:{common:0.4,rare:0.4,epic:0.15,legendary:0.05}},
+    {type:'gold',name:'Gold Box',color:'#ffd700',rates:{common:0.2,rare:0.4,epic:0.3,legendary:0.1}},
+    {type:'mythic',name:'Mythic Box',color:'#8a2be2',rates:{common:0.05,rare:0.25,epic:0.4,legendary:0.3}}
+  ];
+
+  const BOX_SPAWN_INTERVAL_FRAMES = 600;
+  const BOX_SPAWN_CHANCE = 0.5;
+
+  let coins = parseInt(localStorage.getItem(LS.coins) || '0', 10);
+  let unlocked = JSON.parse(localStorage.getItem(LS.unlocked) || '["mallard"]');
+  let selected = localStorage.getItem(LS.selected) || 'mallard';
+  let lootInventory = JSON.parse(localStorage.getItem(LS.lootInv) || '[]'); // array of type strings
+  coinEl.textContent = coins;
+
+  function save(){
+    localStorage.setItem(LS.coins,String(coins));
+    localStorage.setItem(LS.unlocked,JSON.stringify(unlocked));
+    localStorage.setItem(LS.selected,selected);
+    localStorage.setItem(LS.lootInv,JSON.stringify(lootInventory));
+    coinEl.textContent = coins;
+  }
+
+  function skinsByRarity(r){ return SKINS.filter(s=>s.rarity===r); }
+
+  // Build shop UI
+  function buildShop(){
+    shopEl.innerHTML = '';
+    SKINS.forEach(skin => {
+      const inShop = (skin.rarity !== 'legendary');
+      const card = document.createElement('div'); card.className = 'card';
+      card.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div class="big">${skin.name}</div>
+            <div class="muted" style="margin-top:6px">Rarity: ${skin.rarity.toUpperCase()}${inShop ? ' • Price: '+skin.price : ''}</div>
+          </div>
+          <canvas class="preview" width="96" height="72" data-skin="${skin.id}"></canvas>
+        </div>
+        <div style="margin-top:10px;display:flex;justify-content:space-between;align-items:center">
+          <div class="muted" style="font-size:12px">${skin.id}</div>
+          <div id="card-btn-${skin.id}"></div>
+        </div>
+      `;
+      shopEl.appendChild(card);
+
+      // draw preview
+      const preview = card.querySelector('canvas');
+      drawDuckPreview(preview.getContext('2d'), skin);
+
+      const btnSlot = card.querySelector(`#card-btn-${skin.id}`);
+      if(unlocked.includes(skin.id)){
+        const sel = document.createElement('button');
+        sel.textContent = (selected === skin.id) ? 'Selected' : 'Select';
+        sel.disabled = (selected === skin.id);
+        sel.onclick = () => { selected = skin.id; save(); buildShop(); };
+        btnSlot.appendChild(sel);
+      } else if(inShop){
+        const buy = document.createElement('button'); buy.textContent='Buy';
+        buy.onclick = () => {
+          if(coins >= skin.price){
+            coins -= skin.price; unlocked.push(skin.id); selected = skin.id; save(); buildShop();
+          } else alert('Not enough coins!');
+        };
+        btnSlot.appendChild(buy);
+      } else {
+        // legendary: show locked
+        const locked = document.createElement('div'); locked.textContent = 'Loot Only'; locked.style.color='#aa6';
+        btnSlot.appendChild(locked);
+      }
+    });
+    buildLootInventory();
+  }
+
+  // helper to count inventory by type (returns array of {type,count})
+  function inventoryCounts(){
+    const counts = {};
+    for(const t of lootInventory) counts[t] = (counts[t]||0)+1;
+    const arr = Object.keys(counts).map(t => ({ type: t, count: counts[t] }));
+    // preserve LOOTBOX_TYPES order
+    return LOOTBOX_TYPES.map(d => ({ type: d.type, count: (counts[d.type]||0) })).filter(x => x.count>0);
+  }
+
+  function buildLootInventory(){
+    lootInventoryEl.innerHTML = '';
+    const counts = inventoryCounts();
+    if(counts.length === 0){
+      lootInventoryEl.innerHTML = '<div class="muted">No lootboxes collected.</div>';
+      claimAllBtn.disabled = true;
+      return;
+    }
+    claimAllBtn.disabled = false;
+    counts.forEach(({type, count}) => {
+      const boxDef = LOOTBOX_TYPES.find(b=>b.type===type) || LOOTBOX_TYPES[0];
+      const row = document.createElement('div');
+      row.className = 'loot-row';
+
+      const left = document.createElement('div'); left.className = 'loot-left';
+      const dot = document.createElement('div'); dot.className = 'loot-dot'; dot.style.background = boxDef.color;
+      left.appendChild(dot);
+      const label = document.createElement('div'); label.textContent = boxDef.name;
+      left.appendChild(label);
+      const badge = document.createElement('div'); badge.className = 'count-badge'; badge.textContent = 'x' + count;
+      left.appendChild(badge);
+
+      row.appendChild(left);
+
+      const actions = document.createElement('div'); actions.className = 'inventory-actions';
+      const claimBtn = document.createElement('button'); claimBtn.textContent = 'Claim';
+      claimBtn.onclick = () => claimLootboxType(type, 1);
+      actions.appendChild(claimBtn);
+
+      const discardBtn = document.createElement('button'); discardBtn.textContent = 'Discard';
+      discardBtn.className = 'secondary';
+      discardBtn.onclick = () => {
+        if(confirm(`Discard one ${boxDef.name}?`)){
+          removeOneOfType(type);
+          save();
+          buildLootInventory();
+        }
+      };
+      actions.appendChild(discardBtn);
+
+      const claimAllTypeBtn = document.createElement('button'); claimAllTypeBtn.textContent = 'Claim All of Type';
+      claimAllTypeBtn.style.marginLeft = '6px';
+      claimAllTypeBtn.onclick = () => claimLootboxType(type, count);
+      actions.appendChild(claimAllTypeBtn);
+
+      row.appendChild(actions);
+      lootInventoryEl.appendChild(row);
+    });
+  }
+
+  // remove one occurrence of a given type from lootInventory
+  function removeOneOfType(type){
+    const idx = lootInventory.indexOf(type);
+    if(idx !== -1) lootInventory.splice(idx,1);
+  }
+
+  // remove N occurrences (up to available)
+  function removeNOfType(type, n){
+    for(let i=0;i<n;i++){
+      const idx = lootInventory.indexOf(type);
+      if(idx===-1) break;
+      lootInventory.splice(idx,1);
+    }
+  }
+
+  // Claim functions
+  async function claimLootboxType(type, howMany=1){
+    // claim sequentially; show each modal & confetti
+    for(let i=0;i<howMany;i++){
+      const idx = lootInventory.indexOf(type);
+      if(idx === -1) break;
+      // perform single claim
+      const boxType = lootInventory[idx];
+      const boxDef = LOOTBOX_TYPES.find(b=>b.type===boxType) || LOOTBOX_TYPES[0];
+
+      // roll rarity
+      const r = Math.random();
+      let acc = 0;
+      let chosenRarity = 'common';
+      for(const rar of ['common','rare','epic','legendary']){
+        acc += (boxDef.rates[rar] || 0);
+        if(r < acc){ chosenRarity = rar; break; }
+      }
+
+      // pick skin preferring unowned
+      let pool = SKINS.filter(s => s.rarity === chosenRarity && !unlocked.includes(s.id));
+      if(pool.length === 0) pool = SKINS.filter(s => s.rarity === chosenRarity);
+      if(pool.length === 0) pool = SKINS;
+      const rewardSkin = pool[Math.floor(Math.random() * pool.length)];
+      const newlyUnlocked = !unlocked.includes(rewardSkin.id);
+      if(newlyUnlocked) unlocked.push(rewardSkin.id);
+
+      // remove one box from inventory
+      removeOneOfType(type);
+      save();
+      buildLootInventory();
+
+      // show modal + confetti
+      await showLootRevealAnimated(rewardSkin, newlyUnlocked);
+      // small pause between reveals
+      await delayPromise(240);
+    }
+  }
+
+  // Claim all inventory (sequential reveals)
+  async function claimAllInventory(){
+    const copy = [...lootInventory]; // snapshot
+    if(copy.length === 0) return;
+    claimAllBtn.disabled = true;
+    // We'll claim in order of types for cleaner UX: group by type
+    const counts = inventoryCounts();
+    for(const entry of counts){
+      const { type, count } = entry;
+      await claimLootboxType(type, count);
+    }
+    claimAllBtn.disabled = false;
+  }
+  claimAllBtn.onclick = claimAllInventory;
+
+  // show reveal modal with confetti animation; returns when user closes OR after short auto delay
+  function showLootRevealAnimated(skin, newlyUnlocked){
+    return new Promise((resolve) => {
+      // build modal content
+      lootModal.innerHTML = '';
+      const wrapper = document.createElement('div');
+      wrapper.className = 'loot-reveal';
+      wrapper.innerHTML = `
+        <div style="font-weight:700;font-size:18px;margin-bottom:6px">Loot Box Opened!</div>
+        <canvas width="180" height="140" id="lootPreview" style="display:block;margin:0 auto;border-radius:8px;background:#fff"></canvas>
+        <div style="font-weight:700;margin-top:6px">${skin.name}</div>
+        <div class="muted" style="margin:6px 0">${skin.rarity.toUpperCase()}${newlyUnlocked ? ' — NEW!' : ' — Already owned'}</div>
+        <div style="display:flex;gap:8px;justify-content:center;margin-top:8px">
+          <button id="lootCloseBtn">Close</button>
+        </div>
+      `;
+      lootModal.appendChild(wrapper);
+      lootModal.style.display = 'block';
+
+      // draw preview
+      const pre = document.getElementById('lootPreview');
+      drawDuckPreview(pre.getContext('2d'), skin, 1.8);
+
+      // run confetti
+      runConfettiShort();
+
+      // close handler
+      const closeBtn = document.getElementById('lootCloseBtn');
+      closeBtn.onclick = () => {
+        lootModal.style.display = 'none';
+        resolve();
+      };
+
+      // auto close after 1.2s if user doesn't click
+      const t = setTimeout(()=> {
+        if(lootModal.style.display !== 'none'){
+          lootModal.style.display = 'none';
+          resolve();
+        }
+      }, 1200);
+    });
+  }
+
+  // small temporary modal (auto hide) for "collected" feedback
+  let _tempModalTimer = null;
+  function showTempModal(text){
+    lootModal.innerHTML = `<div style="padding:10px;text-align:center">${text}</div>`;
+    lootModal.style.display = 'block';
+    if(_tempModalTimer) clearTimeout(_tempModalTimer);
+    _tempModalTimer = setTimeout(()=> { lootModal.style.display='none'; _tempModalTimer = null; }, 900);
+  }
+
+  // Confetti implementation (simple particle burst)
+  function runConfettiShort(){
+    confettiCanvas.style.display = 'block';
+    confettiCanvas.width = window.innerWidth;
+    confettiCanvas.height = window.innerHeight;
+    const Wc = confettiCanvas.width, Hc = confettiCanvas.height;
+    const pieces = [];
+    const colors = ['#ff4f4f','#ffd700','#6be18b','#7be0ff','#d38fff','#ffb86b'];
+
+    for(let i=0;i<60;i++){
+      pieces.push({
+        x: Wc/2 + rand(-80,80),
+        y: Hc/2 + rand(-40,40),
+        vx: (Math.random()-0.5) * 8,
+        vy: rand(-8,-2),
+        ang: Math.random()*Math.PI*2,
+        rot: (Math.random()-0.5)*0.2,
+        size: rand(5,11),
+        color: colors[Math.floor(Math.random()*colors.length)],
+        life: 0,
+        ttl: rand(40,90)
+      });
+    }
+
+    let t0 = null;
+    function step(ts){
+      if(!t0) t0 = ts;
+      const elapsed = ts - t0;
+      confettiCtx.clearRect(0,0,Wc,Hc);
+      for(const p of pieces){
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.25; // gravity
+        p.ang += p.rot;
+        p.life++;
+        confettiCtx.save();
+        confettiCtx.translate(p.x, p.y);
+        confettiCtx.rotate(p.ang);
+        confettiCtx.fillStyle = p.color;
+        confettiCtx.fillRect(-p.size/2, -p.size/2, p.size, p.size*0.6);
+        confettiCtx.restore();
+      }
+      // stop after 1.1s
+      if(elapsed < 1100) requestAnimationFrame(step);
+      else {
+        confettiCtx.clearRect(0,0,Wc,Hc);
+        confettiCanvas.style.display = 'none';
+      }
+    }
+    requestAnimationFrame(step);
+  }
+
+  // --- Game state ---
+  const groundY = H - 34;
+  let player = {};
+  let obstacles = [];
+  let pickups = [];   // coins and boxes
+  let frame = 0;
+  let scrollSpeed = 6;
+  let score = 0;
+  let running = false, paused=false;
+  let mode = 'endless', level = 1, levelGoal = 300;
+
+  document.querySelectorAll('input[name="mode"]').forEach(r=> r.addEventListener('change', e=> { mode = e.target.value; updateHUD(); }));
+
+  function resetGame(){
+    obstacles = []; pickups = [];
+    player = { x:70, y: groundY - 36, w:44, h:36, vy:0, jumping:false, ducking:false };
+    frame = 0; scrollSpeed = 6; score = 0; level = 1; running = false; paused = false;
+    updateHUD(); draw();
+  }
+  resetGame();
+
+  // controls
+  window.addEventListener('keydown', e=>{
+    if(e.code === 'Space' || e.key === 'ArrowUp') tryJump();
+    if(e.key === 'ArrowDown') player.ducking = true;
+  });
+  window.addEventListener('keyup', e=>{ if(e.key === 'ArrowDown') player.ducking = false; });
+  canvas.addEventListener('touchstart', e=> { e.preventDefault(); tryJump(); }, {passive:false});
+
+  function tryJump(){
+    if(!running){ start(); playBtn.textContent='Pause'; }
+    if(!player.jumping){ player.vy = -12; player.jumping = true; player.ducking=false; }
+  }
+
+  playBtn.onclick = () => {
+    if(!running){ start(); playBtn.textContent='Pause'; }
+    else { paused = !paused; playBtn.textContent = paused ? 'Resume' : 'Pause'; if(!paused) loop(); }
+  };
+  resetBtn.onclick = () => {
+    if(confirm('Reset progress (coins, skins, lootboxes)?')){
+      localStorage.clear(); coins=0; unlocked=['mallard']; selected='mallard'; lootInventory=[]; save(); buildShop(); resetGame();
+    }
+  };
+
+  function start(){ if(running) return; running=true; paused=false; obstacles=[]; pickups=[]; score=0; frame=0; scrollSpeed=6; loop(); }
+
+  // main loop
+  function loop(){
+    if(!running || paused) return;
+    update();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  function update(){
+    frame++;
+    // physics
+    player.vy += 0.8; player.y += player.vy;
+    if(player.y >= groundY - player.h){ player.y = groundY - player.h; player.vy = 0; player.jumping = false; }
+    player.h = (player.ducking && !player.jumping) ? 22 : 36;
+
+    // spawn obstacles & coin pickups
+    if(frame % Math.max(30, 100 - Math.floor(score/120)) === 0){
+      const h = rand(18,34);
+      obstacles.push({ x: W + 10, w: rand(18,36), h, y: groundY - h });
+    }
+    // coin pickups less frequent
+    if(frame % 240 === 0) pickups.push({ type:'coin', x: W + 20, y: groundY - 70 - rand(0,40), w:12, h:12 });
+
+    // spawn loot box occasionally (choose a random box type)
+    if(frame % BOX_SPAWN_INTERVAL_FRAMES === 0){
+      if(Math.random() < BOX_SPAWN_CHANCE){
+        const boxType = LOOTBOX_TYPES[rand(0, LOOTBOX_TYPES.length - 1)].type;
+        pickups.push({ type:'box', boxType, x: W + 20, y: groundY - 48, w:22, h:22 });
+      }
+    }
+
+    // move obstacles & pickups
+    for(let i=obstacles.length-1;i>=0;i--){ obstacles[i].x -= scrollSpeed; if(obstacles[i].x + obstacles[i].w < 0) obstacles.splice(i,1); }
+    for(let i=pickups.length-1;i>=0;i--){ pickups[i].x -= scrollSpeed; if(pickups[i].x + pickups[i].w < 0) pickups.splice(i,1); }
+
+    // collisions
+    const px = player.x, py = player.y, pw = player.w, ph = player.h;
+    for(let i=obstacles.length-1;i>=0;i--){
+      const o = obstacles[i];
+      if(rectColl(px,py,pw,ph,o.x,o.y,o.w,o.h)){ endRun(); return; }
+    }
+    for(let i=pickups.length-1;i>=0;i--){
+      const p = pickups[i];
+      if(rectColl(px,py,pw,ph,p.x,p.y,p.w,p.h)){
+        // handle pickups
+        if(p.type === 'coin'){
+          coins += 10;
+          pickups.splice(i,1);
+          save(); buildShop();
+        } else if(p.type === 'box'){
+          // add the specific box type to loot inventory (don't open immediately)
+          lootInventory.push(p.boxType);
+          pickups.splice(i,1);
+          save(); buildLootInventory();
+          // tiny feedback
+          showTempModal(`${LOOTBOX_TYPES.find(b=>b.type===p.boxType).name} collected!`);
+        }
+      }
+    }
+
+    // scoring & speed increase
+    if(mode === 'endless'){
+      score += Math.floor(scrollSpeed * 0.6);
+      if(frame % 120 === 0) scrollSpeed += 0.08;
+    } else {
+      score += Math.floor(1 + level * 0.7);
+      if(score >= levelGoal){ level++; score=0; levelGoal = Math.floor(levelGoal * 1.25); scrollSpeed += 1.2; coins += 50; save(); buildShop(); alert('Level passed! Bonus 50 coins.'); }
+    }
+
+    updateHUD();
+  }
+
+  function endRun(){
+    running = false;
+    const reward = Math.max(5, Math.floor(score/25));
+    coins += reward; save(); buildShop();
+    setTimeout(()=> alert('You crashed! Earned ' + reward + ' coins.'), 80);
+    playBtn.textContent = 'Play'; resetGame();
+  }
+
+  // Show modal revealing the loot box reward (non-animated fallback)
+  function showLootModal(skin, newlyUnlocked){
+    lootModal.innerHTML = '';
+    const div = document.createElement('div');
+    div.className = 'loot-reveal';
+    div.style.textAlign = 'center';
+    div.innerHTML = `<div style="font-weight:700;font-size:18px;margin-bottom:8px">Loot Box Opened!</div>
+      <canvas width="160" height="120" style="display:block;margin:0 auto 8px;border-radius:8px;background:#fff" id="lootPreview"></canvas>
+      <div style="font-weight:700">${skin.name}</div>
+      <div class="muted" style="margin:6px 0">${skin.rarity.toUpperCase()}${newlyUnlocked ? ' — NEW!' : ' — Already owned'}</div>
+      <div style="display:flex;gap:8px;justify-content:center;margin-top:8px">
+        <button id="lootClose">Close</button>
+      </div>
+    `;
+    lootModal.appendChild(div);
+    lootModal.style.display = 'block';
+
+    const pre = document.getElementById('lootPreview');
+    drawDuckPreview(pre.getContext('2d'), skin, 1.6);
+
+    document.getElementById('lootClose').onclick = () => { lootModal.style.display = 'none'; };
+  }
+
+  // Drawing functions
+  function draw(){
+    // clear
+    ctx.clearRect(0,0,W,H);
+    // sky gradient
+    const g = ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#e5f8ff'); g.addColorStop(1,'#ffffff'); ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+
+    // ground
+    ctx.fillStyle = '#2c2c2c'; ctx.fillRect(0, groundY, W, 4);
+
+    // clouds
+    drawClouds();
+
+    // pickups
+    pickups.forEach(p=>{
+      if(p.type === 'coin'){
+        // coin
+        ctx.fillStyle = '#ffd166';
+        roundRect(ctx, p.x, p.y, p.w, p.h, 4);
+        ctx.fillStyle = '#fff'; ctx.fillRect(p.x+3, p.y+3, 2, 2);
+      } else if(p.type === 'box'){
+        // loot box - color based on type
+        const def = LOOTBOX_TYPES.find(b=>b.type===p.boxType) || LOOTBOX_TYPES[0];
+        const bx = p.x, by = p.y, bw = p.w, bh = p.h;
+        // outer
+        ctx.fillStyle = def.color; roundRect(ctx, bx, by, bw, bh, 4);
+        // inner darker
+        ctx.fillStyle = 'rgba(0,0,0,0.12)'; roundRect(ctx, bx+3, by+3, bw-6, bh-6, 3);
+        // latch
+        ctx.fillStyle = '#ffd700'; ctx.fillRect(bx + bw/2 - 3, by + bh/2 - 6, 6, 12);
+        // small shine
+        ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fillRect(bx+2, by+2, bw/3, 3);
+      }
+    });
+
+    // obstacles
+    ctx.fillStyle = '#2b2b2b';
+    obstacles.forEach(o=> roundRect(ctx, o.x, o.y, o.w, o.h, 6));
+
+    // player: draw selected duck
+    const skin = SKINS.find(s=>s.id === selected) || SKINS[0];
+    const anim = Math.floor((frame / 6) % 4);
+    drawDuck(ctx, skin, player.x, player.y, anim, player.ducking, player.jumping);
+
+    // UI text
+    ctx.fillStyle = '#133'; ctx.font = '14px system-ui, Arial';
+    ctx.fillText((mode==='endless' ? 'Score: ' + score : `Level ${level} • ${score}/${levelGoal}`), W - 220, 22);
+  }
+
+  function drawClouds(){
+    ctx.fillStyle = '#fff';
+    const base = (frame * -0.4) % (W + 300);
+    for(let i=0;i<3;i++){
+      const cx = (base + i*320) % (W + 300) - 100;
+      const cy = 26 + i*12;
+      ellipse(ctx, cx, cy, 48, 14); ellipse(ctx, cx+28, cy+6, 36, 10); ellipse(ctx, cx-24, cy+8, 30, 10);
+    }
+  }
+
+  // draw little preview of a skin (used in shop and modal)
+  function drawDuckPreview(gctx, skin, scale=1.0){
+    const cw = gctx.canvas.width, ch = gctx.canvas.height;
+    gctx.clearRect(0,0,cw,ch);
+    // sky bg
+    gctx.fillStyle = '#e8fefe'; gctx.fillRect(0,0,cw,ch);
+    gctx.fillStyle = '#2c2c2c'; gctx.fillRect(0,ch-20,cw,20);
+    // draw duck centered
+    const px = Math.round(cw*0.4), py = Math.round(ch - 24);
+    drawDuck(gctx, skin, px - 20, py - 36, 1, false, false, scale);
+  }
+
+  // drawDuck: main duck draw routine (procedural)
+  function drawDuck(ctx2, skin, x, y, animFrame=0, ducking=false, jumping=false, scale=1){
+    const pal = skin.palette || ['#ffca28','#ffd88a'];
+    const main = pal[0], accent = pal[1] || '#fff';
+    const s = scale;
+    ctx2.save();
+    ctx2.translate(0,0);
+    ctx2.scale(s,s);
+
+    const bx = Math.round(x / s), by = Math.round(y / s);
+    // shadow
+    ctx2.fillStyle = 'rgba(0,0,0,0.12)';
+    ctx2.beginPath(); ctx2.ellipse(bx+26, by+52, 28, 8, 0, 0, Math.PI*2); ctx2.fill();
+
+    // body
+    ctx2.fillStyle = main;
+    roundRect(ctx2, bx, by + 14, 48, 26, 16);
+
+    // head / beak
+    roundRect(ctx2, bx + 34, by + 4, 22, 18, 8);
+    ctx2.fillStyle = accent;
+    ctx2.fillRect(bx + 44, by + 12, 8, 6);
+    ctx2.fillStyle = '#000'; ctx2.fillRect(bx + 46, by + 14, 3, 3);
+
+    // beak
+    ctx2.fillStyle = '#ff9f1c';
+    ctx2.beginPath(); ctx2.moveTo(bx + 56, by + 16); ctx2.lineTo(bx + 68, by + 12); ctx2.lineTo(bx + 56, by + 20); ctx2.closePath(); ctx2.fill();
+
+    // wing
+    ctx2.fillStyle = accent;
+    roundRect(ctx2, bx + 8, by + 20, 26, 12, 8);
+
+    // tail
+    ctx2.fillStyle = main;
+    roundRect(ctx2, bx - 10, by + 18, 12, 8, 6);
+
+    // legs animation
+    ctx2.fillStyle = '#8c5a3c';
+    const legLift = (animFrame % 4) < 2 ? -4 : 4;
+    roundRect(ctx2, bx + 18, by + 34 + (ducking?6:0), 6, 12 + (ducking?0:0), 4);
+    roundRect(ctx2, bx + 30, by + 34 + (ducking?6:0) + (legLift/2), 6, 12 + (ducking?0:0), 4);
+
+    // rarity effects
+    if(skin.rarity === 'legendary'){
+      ctx2.strokeStyle = 'rgba(255,215,0,0.25)'; ctx2.lineWidth = 6;
+      ctx2.strokeRect(bx - 2, by + 6, 52, 30);
+    } else if(skin.rarity === 'epic'){
+      ctx2.strokeStyle = 'rgba(120,50,255,0.12)'; ctx2.lineWidth = 4; ctx2.strokeRect(bx, by + 8, 48, 26);
+    }
+
+    ctx2.restore();
+  }
+
+  // small shape helpers
+  function roundRect(c, x, y, w, h, r){ c.beginPath(); c.moveTo(x+r,y); c.arcTo(x+w,y,x+w,y+h,r); c.arcTo(x+w,y+h,x,y+h,r); c.arcTo(x,y+h,x,y,r); c.arcTo(x,y,x+w,y,r); c.closePath(); c.fill(); }
+  function ellipse(c,x,y,rx,ry){ c.beginPath(); c.ellipse(x,y,rx,ry,0,0,Math.PI*2); c.fill(); }
+
+  // util
+  function rectColl(ax,ay,aw,ah,bx,by,bw,bh){ return !(ax+aw < bx || ax > bx+bw || ay+ah < by || ay > by+bh); }
+  function rand(a,b){ return Math.floor(Math.random()*(b-a+1))+a; }
+  function delayPromise(ms){ return new Promise(r=>setTimeout(r,ms)); }
+  function updateHUD(){ coinEl.textContent = coins; scoreEl.textContent = (mode==='endless') ? score : `L${level} · ${score}/${levelGoal}`; }
+
+  // Debug exposure
+  window._duck = { start, resetGame, save, SKINS, unlockedRef: () => unlocked, lootInventoryRef: () => lootInventory };
+
+  // initial UI build
+  buildShop();
+  draw();
+
+})();
+</script>
+</body>
+</html>
