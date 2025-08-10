@@ -58,6 +58,16 @@
     position:fixed; left:0; top:0; width:100vw; height:100vh; pointer-events:none; z-index:10000;
   }
 
+  .empty-modal {
+    text-align:center;
+    min-width:240px;
+    padding:14px;
+  }
+  .empty-modal .sad{
+    font-size:48px;
+    margin-bottom:8px;
+  }
+
 </style>
 </head>
 <body>
@@ -114,12 +124,11 @@
 
 <script>
 /*
-  Enhanced version:
-  - Stacked inventory counts
-  - Claim per type and Discard
-  - Claim All button (claims sequentially, reveals each)
-  - Confetti animation on claim
-  - All persistent via localStorage
+  Full file with empty-box behavior
+  - Each LOOTBOX_TYPES entry has `emptyChance` (probability between 0 and 1)
+  - When claiming, roll for empty first: if empty -> show "Sorry, you have an empty box!"
+  - Otherwise proceed to pick rarity and reward like before
+  - Works for single claims, claim-by-type, and Claim All
 */
 
 (() => {
@@ -161,21 +170,24 @@
     {id:'shadow',name:'Shadow Duck',price:0,rarity:'legendary',palette:['#050506','#303033']}
   ];
 
+  // Lootbox definitions with emptyChance for each type
+  // Wooden: more likely empty, Bronze: moderately, Silver: small, Gold: very small, Mythic: nearly never empty
   const LOOTBOX_TYPES = [
-    {type:'wooden',name:'Wooden Box',color:'#8b5e3c',rates:{common:0.8,rare:0.15,epic:0.05,legendary:0}},
-    {type:'bronze',name:'Bronze Box',color:'#cd7f32',rates:{common:0.6,rare:0.3,epic:0.09,legendary:0.01}},
-    {type:'silver',name:'Silver Box',color:'#c0c0c0',rates:{common:0.4,rare:0.4,epic:0.15,legendary:0.05}},
-    {type:'gold',name:'Gold Box',color:'#ffd700',rates:{common:0.2,rare:0.4,epic:0.3,legendary:0.1}},
-    {type:'mythic',name:'Mythic Box',color:'#8a2be2',rates:{common:0.05,rare:0.25,epic:0.4,legendary:0.3}}
+    {type:'wooden',name:'Wooden Box',color:'#8b5e3c',emptyChance:0.25,rates:{common:0.8,rare:0.15,epic:0.05,legendary:0}},
+    {type:'bronze',name:'Bronze Box',color:'#cd7f32',emptyChance:0.15,rates:{common:0.6,rare:0.3,epic:0.09,legendary:0.01}},
+    {type:'silver',name:'Silver Box',color:'#c0c0c0',emptyChance:0.08,rates:{common:0.4,rare:0.4,epic:0.15,legendary:0.05}},
+    {type:'gold',name:'Gold Box',color:'#ffd700',emptyChance:0.03,rates:{common:0.2,rare:0.4,epic:0.3,legendary:0.1}},
+    {type:'mythic',name:'Mythic Box',color:'#8a2be2',emptyChance:0.01,rates:{common:0.05,rare:0.25,epic:0.4,legendary:0.3}}
   ];
 
   const BOX_SPAWN_INTERVAL_FRAMES = 600;
   const BOX_SPAWN_CHANCE = 0.5;
 
+  // load saved state
   let coins = parseInt(localStorage.getItem(LS.coins) || '0', 10);
   let unlocked = JSON.parse(localStorage.getItem(LS.unlocked) || '["mallard"]');
   let selected = localStorage.getItem(LS.selected) || 'mallard';
-  let lootInventory = JSON.parse(localStorage.getItem(LS.lootInv) || '[]'); // array of type strings
+  let lootInventory = JSON.parse(localStorage.getItem(LS.lootInv) || '[]');
   coinEl.textContent = coins;
 
   function save(){
@@ -241,7 +253,6 @@
   function inventoryCounts(){
     const counts = {};
     for(const t of lootInventory) counts[t] = (counts[t]||0)+1;
-    const arr = Object.keys(counts).map(t => ({ type: t, count: counts[t] }));
     // preserve LOOTBOX_TYPES order
     return LOOTBOX_TYPES.map(d => ({ type: d.type, count: (counts[d.type]||0) })).filter(x => x.count>0);
   }
@@ -313,15 +324,26 @@
 
   // Claim functions
   async function claimLootboxType(type, howMany=1){
-    // claim sequentially; show each modal & confetti
+    // claim sequentially; show each modal & confetti or empty modal
     for(let i=0;i<howMany;i++){
       const idx = lootInventory.indexOf(type);
       if(idx === -1) break;
-      // perform single claim
-      const boxType = lootInventory[idx];
-      const boxDef = LOOTBOX_TYPES.find(b=>b.type===boxType) || LOOTBOX_TYPES[0];
 
-      // roll rarity
+      const boxDef = LOOTBOX_TYPES.find(b=>b.type===type) || LOOTBOX_TYPES[0];
+
+      // first check if box is empty
+      const isEmpty = Math.random() < (boxDef.emptyChance || 0);
+      if(isEmpty){
+        // consume the box, save, update UI
+        removeOneOfType(type);
+        save();
+        buildLootInventory();
+        await showEmptyAnimated(boxDef);
+        await delayPromise(200);
+        continue;
+      }
+
+      // not empty -> roll rarity
       const r = Math.random();
       let acc = 0;
       let chosenRarity = 'common';
@@ -345,7 +367,6 @@
 
       // show modal + confetti
       await showLootRevealAnimated(rewardSkin, newlyUnlocked);
-      // small pause between reveals
       await delayPromise(240);
     }
   }
@@ -355,7 +376,7 @@
     const copy = [...lootInventory]; // snapshot
     if(copy.length === 0) return;
     claimAllBtn.disabled = true;
-    // We'll claim in order of types for cleaner UX: group by type
+    // Claim grouped by type for nicer UX
     const counts = inventoryCounts();
     for(const entry of counts){
       const { type, count } = entry;
@@ -365,7 +386,7 @@
   }
   claimAllBtn.onclick = claimAllInventory;
 
-  // show reveal modal with confetti animation; returns when user closes OR after short auto delay
+  // show reveal modal with confetti animation; returns when modal closed or auto-closed
   function showLootRevealAnimated(skin, newlyUnlocked){
     return new Promise((resolve) => {
       // build modal content
@@ -388,7 +409,7 @@
       const pre = document.getElementById('lootPreview');
       drawDuckPreview(pre.getContext('2d'), skin, 1.8);
 
-      // run confetti
+      // run confetti for good reward
       runConfettiShort();
 
       // close handler
@@ -405,6 +426,38 @@
           resolve();
         }
       }, 1200);
+    });
+  }
+
+  // show "empty box" modal with small animation, returns when closed or auto-closed
+  function showEmptyAnimated(boxDef){
+    return new Promise((resolve) => {
+      lootModal.innerHTML = '';
+      const wrapper = document.createElement('div');
+      wrapper.className = 'empty-modal';
+      wrapper.innerHTML = `
+        <div class="sad">😢</div>
+        <div style="font-weight:700;margin-bottom:6px">Sorry — you have an empty box!</div>
+        <div class="muted" style="margin-bottom:8px">${boxDef.name} contained nothing this time.</div>
+        <div style="display:flex;gap:8px;justify-content:center">
+          <button id="emptyCloseBtn">Close</button>
+        </div>
+      `;
+      lootModal.appendChild(wrapper);
+      lootModal.style.display = 'block';
+
+      document.getElementById('emptyCloseBtn').onclick = () => {
+        lootModal.style.display = 'none';
+        resolve();
+      };
+
+      // auto close after 900ms
+      setTimeout(()=> {
+        if(lootModal.style.display !== 'none'){
+          lootModal.style.display = 'none';
+          resolve();
+        }
+      }, 900);
     });
   }
 
